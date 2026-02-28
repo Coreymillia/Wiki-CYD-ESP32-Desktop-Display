@@ -14,7 +14,8 @@ static char    wk_wifi_ssid[64]      = "";
 static char    wk_wifi_pass[64]      = "";
 static char    wk_font_color[16]     = "blue";  // blue|orange|green|cyan|white|multi
 static uint8_t wk_font_size          = 1;        // 1=small 2=medium 3=large
-static uint8_t wk_refresh_interval   = 1;        // 0=5min 1=30min 2=1hour
+static uint8_t wk_refresh_interval   = 4;        // 0=15s 1=30s 2=1m 3=3m 4=5m 5=30m 6=1hr
+static uint8_t wk_scroll_interval    = 0;        // 0=off 1=30s 2=1m 3=90s 4=2m
 static bool    wk_has_settings       = false;
 
 // ---------------------------------------------------------------------------
@@ -34,18 +35,21 @@ static void wkLoadSettings() {
   String pass     = prefs.getString("pass",     "");
   String fcolor   = prefs.getString("fcolor",   "blue");
   wk_font_size        = (uint8_t)prefs.getUChar("fsize",    1);
-  wk_refresh_interval = (uint8_t)prefs.getUChar("interval", 1);
+  wk_refresh_interval = (uint8_t)prefs.getUChar("interval", 4);
+  wk_scroll_interval  = (uint8_t)prefs.getUChar("scroll",   0);
   prefs.end();
   ssid.toCharArray(wk_wifi_ssid,    sizeof(wk_wifi_ssid));
   pass.toCharArray(wk_wifi_pass,    sizeof(wk_wifi_pass));
   fcolor.toCharArray(wk_font_color, sizeof(wk_font_color));
   if (wk_font_size < 1 || wk_font_size > 3) wk_font_size = 1;
-  if (wk_refresh_interval > 2) wk_refresh_interval = 1;
+  if (wk_refresh_interval > 6) wk_refresh_interval = 4;
+  if (wk_scroll_interval  > 4) wk_scroll_interval  = 0;
   wk_has_settings = (ssid.length() > 0);
 }
 
 static void wkSaveSettings(const char* ssid, const char* pass,
-                            const char* fcolor, uint8_t fsize, uint8_t interval) {
+                            const char* fcolor, uint8_t fsize,
+                            uint8_t interval, uint8_t scroll) {
   Preferences prefs;
   prefs.begin("wikicyd", false);
   prefs.putString("ssid",     ssid);
@@ -53,12 +57,14 @@ static void wkSaveSettings(const char* ssid, const char* pass,
   prefs.putString("fcolor",   fcolor);
   prefs.putUChar("fsize",     fsize);
   prefs.putUChar("interval",  interval);
+  prefs.putUChar("scroll",    scroll);
   prefs.end();
   strncpy(wk_wifi_ssid,   ssid,   sizeof(wk_wifi_ssid)    - 1);
   strncpy(wk_wifi_pass,   pass,   sizeof(wk_wifi_pass)    - 1);
   strncpy(wk_font_color,  fcolor, sizeof(wk_font_color)   - 1);
   wk_font_size        = fsize;
   wk_refresh_interval = interval;
+  wk_scroll_interval  = scroll;
   wk_has_settings     = true;
 }
 
@@ -182,13 +188,26 @@ static void wkHandleRoot() {
 
   // Refresh interval
   html += "<label>Auto-Refresh Interval:</label><div class='rg'>";
-  const char* intVals[]   = {"0","1","2"};
-  const char* intLabels[] = {"5 minutes", "30 minutes (default)", "1 hour"};
-  for (int i = 0; i < 3; i++) {
+  const char* intVals[]   = {"0","1","2","3","4","5","6"};
+  const char* intLabels[] = {"15 seconds","30 seconds","1 minute","3 minutes","5 minutes (default)","30 minutes","1 hour"};
+  for (int i = 0; i < 7; i++) {
     html += "<label class='rl'><input type='radio' name='interval' value='";
     html += intVals[i]; html += "'";
     if (wk_refresh_interval == (uint8_t)i) html += " checked";
     html += "> "; html += intLabels[i]; html += "</label>";
+  }
+  html +=
+    "</div>";
+
+  // Auto-scroll speed
+  html += "<label>Auto-Scroll Speed (on-screen text):</label><div class='rg'>";
+  const char* scrollVals[]   = {"0","1","2","3","4"};
+  const char* scrollLabels[] = {"Off (default)","30 seconds","1 minute","90 seconds","2 minutes"};
+  for (int i = 0; i < 5; i++) {
+    html += "<label class='rl'><input type='radio' name='scroll' value='";
+    html += scrollVals[i]; html += "'";
+    if (wk_scroll_interval == (uint8_t)i) html += " checked";
+    html += "> "; html += scrollLabels[i]; html += "</label>";
   }
   html +=
     "</div><br>"
@@ -227,7 +246,8 @@ static void wkHandleSave() {
   wkSaveSettings(ssid.c_str(), pass.c_str(),
     (portalServer->hasArg("fcolor")   ? portalServer->arg("fcolor").c_str()                                 : "blue"),
     (portalServer->hasArg("fsize")    ? (uint8_t)constrain(portalServer->arg("fsize").toInt(),    1, 3)     : 1),
-    (portalServer->hasArg("interval") ? (uint8_t)constrain(portalServer->arg("interval").toInt(), 0, 2)     : 1));
+    (portalServer->hasArg("interval") ? (uint8_t)constrain(portalServer->arg("interval").toInt(), 0, 6)     : 4),
+    (portalServer->hasArg("scroll")   ? (uint8_t)constrain(portalServer->arg("scroll").toInt(),   0, 4)     : 0));
 
   portalServer->send(200, "text/html",
     "<html><head><meta charset='UTF-8'>"

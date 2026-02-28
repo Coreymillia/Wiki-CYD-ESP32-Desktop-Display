@@ -5,8 +5,10 @@
 // MODE_QR:      QR code linking to full Wikipedia article
 //               Tap anywhere to go back
 //
-// Footer (MODE_ARTICLE): QR | NEW | AUTO/PAUSE
-// BOOT button: short press = new article, long press (2s+) = re-enter setup
+// Footer (5 zones, 64px each):
+//   CONTENT(0-63): WIKI→JOKE→QUOT→ALL  |  QR(64-127)  |  NEW(128-191)
+//   AUTO(192-255): toggle auto-fetch    |  SCROLL(256-319): cycle scroll speed
+// BOOT button: short press = new content, long press (2s+) = re-enter setup
 
 #include <Arduino.h>
 #include <WiFi.h>
@@ -17,6 +19,16 @@
 #include <qrcode.h>
 #include "Portal.h"
 #include "Wikipedia.h"
+#include "Quotes.h"
+
+// Forward declarations
+void fetchArticle();
+void fetchContent();
+void renderArticle();
+void renderQuote();
+void renderCurrent();
+void renderQR();
+void renderFooter();
 
 // ---------------------------------------------------------------------------
 // Display — CYD ILI9341 320x240 landscape
@@ -56,6 +68,14 @@ static unsigned long lastTouchTime = 0;
 #define MODE_QR      1
 
 // ---------------------------------------------------------------------------
+// Content types
+// ---------------------------------------------------------------------------
+#define CONTENT_WIKI  0
+#define CONTENT_JOKE  1
+#define CONTENT_QUOTE 2
+#define CONTENT_ALL   3   // cycles WIKI→JOKE→QUOTE one at a time
+
+// ---------------------------------------------------------------------------
 // Timers & BOOT button
 // ---------------------------------------------------------------------------
 #define BOOT_PIN     0
@@ -63,9 +83,22 @@ static unsigned long lastTouchTime = 0;
 
 // Refresh intervals matching AP setting index
 static const unsigned long REFRESH_INTERVALS[] = {
-  5UL  * 60UL * 1000UL,   // 0 = 5 minutes
-  30UL * 60UL * 1000UL,   // 1 = 30 minutes
-  60UL * 60UL * 1000UL,   // 2 = 1 hour
+  15UL  * 1000UL,           // 0 = 15 seconds
+  30UL  * 1000UL,           // 1 = 30 seconds
+  60UL  * 1000UL,           // 2 = 1 minute
+  3UL   * 60UL * 1000UL,   // 3 = 3 minutes
+  5UL   * 60UL * 1000UL,   // 4 = 5 minutes
+  30UL  * 60UL * 1000UL,   // 5 = 30 minutes
+  60UL  * 60UL * 1000UL,   // 6 = 1 hour
+};
+
+// Auto-scroll intervals matching AP setting index (0 = off)
+static const unsigned long SCROLL_INTERVALS[] = {
+  0,                        // 0 = off
+  30UL  * 1000UL,           // 1 = 30 seconds
+  60UL  * 1000UL,           // 2 = 1 minute
+  90UL  * 1000UL,           // 3 = 90 seconds
+  2UL   * 60UL * 1000UL,   // 4 = 2 minutes
 };
 
 // ---------------------------------------------------------------------------
@@ -88,9 +121,12 @@ static uint16_t getThemeColor(int idx) {
 // App state
 // ---------------------------------------------------------------------------
 static int           sc_mode      = MODE_ARTICLE;
+static int           wk_content   = CONTENT_WIKI;  // WIKI / JOKE / QUOTE / ALL
+static int           wk_all_sub   = 0;      // sub-content in ALL mode (0=WIKI,1=JOKE,2=QUOTE)
 static int           wk_artLine   = 0;      // current scroll position in extract
-static bool          wk_autoFetch = false;  // auto-fetch new article on interval
+static bool          wk_autoFetch = false;  // auto-fetch new content on interval
 static unsigned long wk_autoLast  = 0;      // millis() of last auto-fetch trigger
+static unsigned long wk_scrollLast = 0;     // millis() of last auto-scroll step
 
 // ---------------------------------------------------------------------------
 // Article line-wrap cache
@@ -160,7 +196,44 @@ static int drawWrapped(const char* text, int x, int y,
 }
 
 // ---------------------------------------------------------------------------
-// Fetch a new random article
+// Fetch content for the active content type
+// ---------------------------------------------------------------------------
+void fetchContent() {
+  wk_artLine = 0;
+  // In ALL mode, advance to the next sub-content type then fetch it
+  if (wk_content == CONTENT_ALL) {
+    wk_all_sub = (wk_all_sub + 1) % 3;
+    if (wk_all_sub == 0) { fetchArticle(); return; }
+    wkHasQuote = false;
+    showStatus(wk_all_sub == 1 ? "Fetching joke..." : "Fetching quote...");
+    int r = (wk_all_sub == 1) ? jokeFetch() : quoteFetch();
+    wk_autoLast = millis();
+    if (r < 0) {
+      char msg[48];
+      snprintf(msg, sizeof(msg), "Fetch failed (HTTP %d) — retrying...", wkQuoteHttpCode);
+      showStatus(msg);
+      delay(2000);
+    }
+    return;
+  }
+  if (wk_content == CONTENT_WIKI) {
+    fetchArticle();
+    return;
+  }
+  wkHasQuote = false;
+  showStatus(wk_content == CONTENT_JOKE ? "Fetching joke..." : "Fetching quote...");
+  int r = (wk_content == CONTENT_JOKE) ? jokeFetch() : quoteFetch();
+  wk_autoLast = millis();
+  if (r < 0) {
+    char msg[48];
+    snprintf(msg, sizeof(msg), "Fetch failed (HTTP %d) — retrying...", wkQuoteHttpCode);
+    showStatus(msg);
+    delay(2000);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fetch a random Wikipedia article
 // ---------------------------------------------------------------------------
 void fetchArticle() {
   showStatus("Fetching Wikipedia article...");
@@ -182,32 +255,59 @@ void fetchArticle() {
 }
 
 // ---------------------------------------------------------------------------
-// Footer renderer (shared between article and loading states)
+// Render helper — picks article or quote view based on active content type
+// ---------------------------------------------------------------------------
+void renderCurrent() {
+  int eff = (wk_content == CONTENT_ALL) ? wk_all_sub : wk_content;
+  if (eff == CONTENT_WIKI) renderArticle();
+  else renderQuote();
+}
+
+// ---------------------------------------------------------------------------
+// Footer renderer — 5 zones (64px each):
+//   CONTENT(0-63) | QR(64-127) | NEW(128-191) | AUTO(192-255) | SCROLL(256-319)
 // ---------------------------------------------------------------------------
 void renderFooter() {
   gfx->fillRect(0, gfx->height() - FOOTER_H, gfx->width(), FOOTER_H, 0x0841);
   gfx->setTextSize(1);
+  const int y = gfx->height() - 18;
 
-  // Zone 0 (0-106): QR
-  gfx->setTextColor(DIM_GRAY);
-  gfx->setCursor(4, gfx->height() - 18);
+  // Zone 0 (0-63): content type — tap to cycle WIKI→JOKE→QUOT→ALL
+  static const char*    ctLabels[] = { "WIKI", "JOKE", "QUOT", "ALL" };
+  static const uint16_t ctColors[] = { WIKI_BLUE, 0xFFE0, 0xF81F, 0x07E0 };
+  gfx->setTextColor(ctColors[wk_content]);
+  gfx->setCursor(4, y);
+  gfx->print(ctLabels[wk_content]);
+
+  // Zone 1 (64-127): QR — active only in WIKI / ALL-showing-WIKI
+  bool wikiActive = (wk_content == CONTENT_WIKI) ||
+                    (wk_content == CONTENT_ALL && wk_all_sub == 0);
+  gfx->setTextColor(wikiActive ? DIM_GRAY : 0x2104);
+  gfx->setCursor(88, y);
   gfx->print("QR");
 
-  // Zone 1 (107-213): NEW
+  // Zone 2 (128-191): NEW
   gfx->setTextColor(WIKI_BLUE);
-  gfx->setCursor(148, gfx->height() - 18);
+  gfx->setCursor(151, y);
   gfx->print("NEW");
 
-  // Zone 2 (214-319): AUTO / PAUSE
+  // Zone 3 (192-255): AUTO / PAUSE
   if (wk_autoFetch) {
-    gfx->setTextColor(0x07FF);  // cyan = running
-    gfx->setCursor(228, gfx->height() - 18);
+    gfx->setTextColor(0x07FF);
+    gfx->setCursor(207, y);
     gfx->print("PAUSE");
   } else {
     gfx->setTextColor(DIM_GRAY);
-    gfx->setCursor(232, gfx->height() - 18);
+    gfx->setCursor(212, y);
     gfx->print("AUTO");
   }
+
+  // Zone 4 (256-319): auto-scroll speed — tap to cycle
+  static const char* scrLabels[] = { "SCR", "30S", " 1M", "90S", " 2M" };
+  uint8_t si = constrain(wk_scroll_interval, 0, 4);
+  gfx->setTextColor(si == 0 ? 0x2104 : 0x07FF);
+  gfx->setCursor(273, y);
+  gfx->print(scrLabels[si]);
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +399,78 @@ void renderArticle() {
 }
 
 // ---------------------------------------------------------------------------
+// JOKE / QUOTE renderer — same scrollable layout as renderArticle()
+// ---------------------------------------------------------------------------
+void renderQuote() {
+  gfx->fillScreen(RGB565_BLACK);
+
+  // Header
+  uint16_t hColor = (wk_content == CONTENT_JOKE) ? 0xFFE0 : 0xF81F;
+  gfx->fillRect(0, 0, gfx->width(), HEADER_H, 0x1082);
+  gfx->setTextSize(1);
+  gfx->setTextColor(hColor);
+  gfx->setCursor(4, 6);
+  gfx->print(wk_content == CONTENT_JOKE ? "Dad Joke" : "Quote");
+
+  if (!wkHasQuote) {
+    gfx->setTextColor(DIM_GRAY);
+    gfx->setCursor(80, 116);
+    gfx->print("Loading...");
+    renderFooter();
+    return;
+  }
+
+  int y = HEADER_H + 4;
+
+  // Author line (quotes only)
+  if (!wkQuote.isJoke && wkQuote.author[0] != '\0') {
+    char authLine[52];
+    snprintf(authLine, sizeof(authLine), "— %.49s", wkQuote.author);
+    gfx->setTextSize(1);
+    gfx->setTextColor(DIM_GRAY);
+    gfx->setCursor(4, y);
+    gfx->print(authLine);
+    y += 11;
+  }
+
+  // Divider
+  gfx->drawFastHLine(0, y, gfx->width(), hColor);
+  y += 5;
+
+  // Reuse article line-wrap cache
+  uint8_t textSz   = wk_font_size;
+  int charsPerLine = (gfx->width() - 8) / (6 * textSz);
+  int lineH        = 9 * textSz;
+  buildArticleLines(wkQuote.text, charsPerLine);
+
+  int bodyBottom = gfx->height() - FOOTER_H - 2;
+  int visLines   = (bodyBottom - y) / lineH;
+  int maxScroll  = artLineCount - visLines;
+  if (maxScroll < 0) maxScroll = 0;
+  if (wk_artLine > maxScroll) wk_artLine = maxScroll;
+
+  gfx->setTextSize(textSz);
+  for (int i = 0; i < visLines; i++) {
+    int li = wk_artLine + i;
+    if (li >= artLineCount) break;
+    gfx->setTextColor(getThemeColor(li));
+    gfx->setCursor(4, y + i * lineH);
+    gfx->print(artLines[li]);
+  }
+
+  // Scroll indicator
+  if (artLineCount > visLines) {
+    int barH   = bodyBottom - y;
+    int thumbH = max(8, barH * visLines / artLineCount);
+    int thumbY = y + (barH - thumbH) * wk_artLine / max(1, maxScroll);
+    gfx->drawFastVLine(gfx->width() - 3, y, barH, 0x2104);
+    gfx->fillRect(gfx->width() - 4, thumbY, 4, thumbH, DIM_GRAY);
+  }
+
+  renderFooter();
+}
+
+// ---------------------------------------------------------------------------
 // MODE_QR renderer — QR code for the Wikipedia article URL
 // ---------------------------------------------------------------------------
 void renderQR() {
@@ -366,32 +538,55 @@ void handleTouch(int tx, int ty) {
     return;
   }
 
-  // MODE_ARTICLE
   if (ty >= footerY) {
-    // Footer 3 zones (~107px each): QR | NEW | AUTO
-    if (tx < gfx->width() / 3) {
-      sc_mode = MODE_QR;
-      renderQR();
-    } else if (tx < 2 * gfx->width() / 3) {
-      // NEW — fetch a fresh random article
-      sc_mode = MODE_ARTICLE;
-      fetchArticle();
-      renderArticle();
-    } else {
+    // Footer 5 zones (64px each): CONTENT(0-63)|QR(64-127)|NEW(128-191)|AUTO(192-255)|SCROLL(256-319)
+    if (tx < 64) {
+      // Cycle content type: WIKI → JOKE → QUOTE → ALL → WIKI
+      wk_content = (wk_content + 1) % 4;
+      wk_artLine = 0;
+      sc_mode    = MODE_ARTICLE;
+      if (wk_content == CONTENT_ALL) {
+        // Start ALL mode from WIKI, reuse cached article if available
+        wk_all_sub = 0;
+        if (!wkHasArticle) fetchArticle();
+        renderArticle();
+      } else if (wk_content == CONTENT_WIKI) {
+        if (!wkHasArticle) fetchArticle();
+        renderArticle();
+      } else {
+        fetchContent();
+        renderQuote();
+      }
+    } else if (tx < 128) {
+      // QR — only active when WIKI content is visible
+      bool wikiActive = (wk_content == CONTENT_WIKI) ||
+                        (wk_content == CONTENT_ALL && wk_all_sub == 0);
+      if (wikiActive) { sc_mode = MODE_QR; renderQR(); }
+    } else if (tx < 192) {
+      // NEW — fetch next content for current type
+      wk_artLine = 0;
+      fetchContent();
+      renderCurrent();
+    } else if (tx < 256) {
       // Toggle auto-fetch
       wk_autoFetch = !wk_autoFetch;
       wk_autoLast  = millis();
+      renderFooter();
+    } else {
+      // Cycle auto-scroll speed: off→30s→1m→3m→5m→30m→1hr→off
+      wk_scroll_interval = (wk_scroll_interval + 1) % 5;
+      wk_scrollLast = millis();
       renderFooter();
     }
   } else if (ty >= HEADER_H) {
     // Body: top half = scroll up, bottom half = scroll down
     int bodyMid = HEADER_H + (footerY - HEADER_H) / 2;
     if (ty < bodyMid) {
-      if (wk_artLine > 0) { wk_artLine--; renderArticle(); }
+      if (wk_artLine > 0) wk_artLine--;
     } else {
-      wk_artLine++;  // renderArticle() will clamp to maxScroll
-      renderArticle();
+      wk_artLine++;
     }
+    renderCurrent();
   }
 }
 
@@ -456,17 +651,30 @@ void setup() {
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
-  // Auto-fetch new random article on interval
-  if (wk_autoFetch && wkHasArticle) {
-    unsigned long interval = REFRESH_INTERVALS[constrain(wk_refresh_interval, 0, 2)];
+  // Auto-fetch new content on interval
+  int effContent = (wk_content == CONTENT_ALL) ? wk_all_sub : wk_content;
+  bool hasContent = (effContent == CONTENT_WIKI) ? wkHasArticle : wkHasQuote;
+  if (wk_autoFetch && hasContent) {
+    unsigned long interval = REFRESH_INTERVALS[constrain(wk_refresh_interval, 0, 6)];
     if (millis() - wk_autoLast >= interval) {
       sc_mode = MODE_ARTICLE;
-      fetchArticle();
-      renderArticle();
+      fetchContent();
+      renderCurrent();
     }
   }
 
-  // BOOT button: short press = new article, long press = re-enter setup
+  // Auto-scroll: advance one line on interval, wrap to top at end
+  if (wk_scroll_interval > 0 && sc_mode == MODE_ARTICLE) {
+    unsigned long scrollInterval = SCROLL_INTERVALS[constrain(wk_scroll_interval, 1, 4)];
+    if (millis() - wk_scrollLast >= scrollInterval) {
+      wk_scrollLast = millis();
+      wk_artLine++;
+      if (wk_artLine >= artLineCount) wk_artLine = 0;
+      renderCurrent();
+    }
+  }
+
+  // BOOT button: short press = new content, long press = re-enter setup
   if (digitalRead(BOOT_PIN) == LOW) {
     delay(50);
     if (digitalRead(BOOT_PIN) == LOW) {
@@ -483,10 +691,11 @@ void loop() {
         wkClosePortal();
         ESP.restart();
       } else {
-        // Short press — new random article
-        sc_mode = MODE_ARTICLE;
-        fetchArticle();
-        renderArticle();
+        // Short press — fetch new content for current type
+        sc_mode    = MODE_ARTICLE;
+        wk_artLine = 0;
+        fetchContent();
+        renderCurrent();
       }
     }
   }
