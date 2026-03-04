@@ -21,6 +21,13 @@
 #include "Wikipedia.h"
 #include "Quotes.h"
 
+// ---------------------------------------------------------------------------
+// Device identity — reported via GET /identify on port 80
+// ---------------------------------------------------------------------------
+#define DEVICE_NAME      "INVERTEDWikiCYD"
+#define FIRMWARE_VERSION "1.0.0"
+#include "CYDIdentity.h"
+
 // Forward declarations
 void fetchArticle();
 void fetchContent();
@@ -245,11 +252,14 @@ void fetchArticle() {
     char msg[48];
     snprintf(msg, sizeof(msg), "Fetch failed (HTTP %d) — retrying...", wkLastHttpCode);
     showStatus(msg);
+    identity_error_flags |= 0x01;
     delay(2000);
   } else {
     char msg[48];
     snprintf(msg, sizeof(msg), "%.40s", wkArticle.title);
     showStatus(msg);
+    identity_last_fetch   = millis() / 1000UL;
+    identity_error_flags &= ~0x01;
     delay(300);
   }
 }
@@ -640,6 +650,8 @@ void setup() {
   showStatus("WiFi connected!");
   delay(400);
 
+  identityBegin();
+
   configTime(0, 0, "pool.ntp.org");
   uint32_t ntpStart = millis();
   while (time(nullptr) < 946684800UL && millis() - ntpStart < 5000) delay(100);
@@ -652,6 +664,8 @@ void setup() {
 // Loop
 // ---------------------------------------------------------------------------
 void loop() {
+  identityHandle();  // service any pending /identify requests before blocking ops
+
   // Auto-fetch new content on interval
   int effContent = (wk_content == CONTENT_ALL) ? wk_all_sub : wk_content;
   bool hasContent = (effContent == CONTENT_WIKI) ? wkHasArticle : wkHasQuote;
@@ -716,4 +730,5 @@ void loop() {
   }
 
   delay(10);
+  identityHandle();
 }
