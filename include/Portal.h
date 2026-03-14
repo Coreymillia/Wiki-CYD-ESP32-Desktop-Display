@@ -16,6 +16,7 @@ static char    wk_font_color[16]     = "blue";  // blue|orange|green|cyan|white|
 static uint8_t wk_font_size          = 1;        // 1=small 2=medium 3=large
 static uint8_t wk_refresh_interval   = 4;        // 0=15s 1=30s 2=1m 3=3m 4=5m 5=30m 6=1hr
 static uint8_t wk_scroll_interval    = 0;        // 0=off 1=30s 2=1m 3=90s 4=2m
+static uint8_t wk_brightness         = 200;       // backlight 10–255
 static bool    wk_has_settings       = false;
 
 // ---------------------------------------------------------------------------
@@ -37,6 +38,8 @@ static void wkLoadSettings() {
   wk_font_size        = (uint8_t)prefs.getUChar("fsize",    1);
   wk_refresh_interval = (uint8_t)prefs.getUChar("interval", 4);
   wk_scroll_interval  = (uint8_t)prefs.getUChar("scroll",   0);
+  wk_brightness       = (uint8_t)prefs.getUChar("bright",   200);
+  if (wk_brightness < 10) wk_brightness = 10;
   prefs.end();
   ssid.toCharArray(wk_wifi_ssid,    sizeof(wk_wifi_ssid));
   pass.toCharArray(wk_wifi_pass,    sizeof(wk_wifi_pass));
@@ -49,7 +52,7 @@ static void wkLoadSettings() {
 
 static void wkSaveSettings(const char* ssid, const char* pass,
                             const char* fcolor, uint8_t fsize,
-                            uint8_t interval, uint8_t scroll) {
+                            uint8_t interval, uint8_t scroll, uint8_t brightness) {
   Preferences prefs;
   prefs.begin("wikicyd", false);
   prefs.putString("ssid",     ssid);
@@ -58,6 +61,7 @@ static void wkSaveSettings(const char* ssid, const char* pass,
   prefs.putUChar("fsize",     fsize);
   prefs.putUChar("interval",  interval);
   prefs.putUChar("scroll",    scroll);
+  prefs.putUChar("bright",    brightness);
   prefs.end();
   strncpy(wk_wifi_ssid,   ssid,   sizeof(wk_wifi_ssid)    - 1);
   strncpy(wk_wifi_pass,   pass,   sizeof(wk_wifi_pass)    - 1);
@@ -65,6 +69,7 @@ static void wkSaveSettings(const char* ssid, const char* pass,
   wk_font_size        = fsize;
   wk_refresh_interval = interval;
   wk_scroll_interval  = scroll;
+  wk_brightness       = brightness;
   wk_has_settings     = true;
 }
 
@@ -142,6 +147,9 @@ static void wkHandleRoot() {
     ".btn-skip:hover{background:#222;color:#888;}"
     ".note{color:#223355;font-size:0.82em;margin-top:16px;}"
     "hr{border:1px solid #112244;margin:20px 0;}"
+    ".rng{display:flex;align-items:center;gap:8px;margin:6px 0 14px;}"
+    ".rng input[type=range]{flex:1;accent-color:#3b7cf8;}"
+    ".rng output{min-width:28px;text-align:right;color:#6699cc;}"
     ".rg{text-align:left;margin:6px 0 14px;display:flex;flex-wrap:wrap;gap:4px 18px;}"
     ".rl{color:#6699cc;cursor:pointer;font-weight:normal;margin:0;}"
     ".rl input{width:auto;border:none;padding:0;background:none;margin-right:4px;}"
@@ -210,7 +218,16 @@ static void wkHandleRoot() {
     html += "> "; html += scrollLabels[i]; html += "</label>";
   }
   html +=
-    "</div><br>"
+    "</div>";
+
+  // Brightness
+  html += "<label>Brightness:</label><div class='rng'>"
+          "<input type='range' name='bright' min='10' max='255' value='";
+  html += String(wk_brightness);
+  html += "' oninput='this.nextElementSibling.value=this.value'>"
+          "<output>";
+  html += String(wk_brightness);
+  html += "</output></div><br>"
     "<button class='btn btn-save' type='submit'>&#128190; Save &amp; Connect</button>"
     "</form>";
 
@@ -247,7 +264,8 @@ static void wkHandleSave() {
     (portalServer->hasArg("fcolor")   ? portalServer->arg("fcolor").c_str()                                 : "blue"),
     (portalServer->hasArg("fsize")    ? (uint8_t)constrain(portalServer->arg("fsize").toInt(),    1, 3)     : 1),
     (portalServer->hasArg("interval") ? (uint8_t)constrain(portalServer->arg("interval").toInt(), 0, 6)     : 4),
-    (portalServer->hasArg("scroll")   ? (uint8_t)constrain(portalServer->arg("scroll").toInt(),   0, 4)     : 0));
+    (portalServer->hasArg("scroll")   ? (uint8_t)constrain(portalServer->arg("scroll").toInt(),   0, 4)     : 0),
+    (portalServer->hasArg("bright")   ? (uint8_t)constrain(portalServer->arg("bright").toInt(),   10, 255)  : 200));
 
   portalServer->send(200, "text/html",
     "<html><head><meta charset='UTF-8'>"

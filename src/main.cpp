@@ -607,7 +607,9 @@ void setup() {
   Serial.begin(115200);
 
   pinMode(GFX_BL, OUTPUT);
-  digitalWrite(GFX_BL, HIGH);
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(GFX_BL, 0);
+  ledcWrite(0, 255);
 
   gfx->begin();
   gfx->fillScreen(RGB565_BLACK);
@@ -619,6 +621,7 @@ void setup() {
   pinMode(BOOT_PIN, INPUT_PULLUP);
 
   wkLoadSettings();
+  ledcWrite(0, wk_brightness);
   bool showPortal = !wk_has_settings;
   if (!showPortal) {
     showStatus("Hold BOOT to change settings...");
@@ -631,6 +634,7 @@ void setup() {
     wkInitPortal();
     while (!portalDone) wkRunPortal();
     wkClosePortal();
+    ledcWrite(0, wk_brightness);
   }
 
   showStatus("Connecting to WiFi...");
